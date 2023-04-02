@@ -1,0 +1,270 @@
+---
+title: "Corpus Processing in Arabic"
+output:
+  html_document:
+    fig_caption: yes
+    number_sections: true
+author: "MiHA"
+---
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  tidy.opts=list(width.cutoff=70), # this last bit auto-wraps code and comments so the don't run off the page, but you need to have formatR installed
+  tidy=TRUE
+)
+```
+
+# Part-of-speech tagging and dependency parsing
+
+We've worked with keyness and effect sizes, specifically using log-likelihood and log ratio measures.
+
+We are now going to add to our toolkit by using the same measures, but applied to data that has been tagged and parsed. To our processing pipeline, we will be adding **udpipe**: <https://bnosac.github.io/udpipe/en/>
+
+# What does udpipe do?
+
+Before we start processing in R, let's get some sense of what "universal dependency parsing" is and what its output looks like.
+
+## Parse a sample sentence online
+
+Go to this webpage: <http://lindat.mff.cuni.cz/services/udpipe/>. 
+
+And paste the following sentence into the text field:
+
+> The company offers credit cards, loans and interest-generating accounts.
+
+Then, click the "Process Input" button. You should now see an output. If you choose the "Table" tab, you can view the output in a tablular format.
+
+## Basic parse structure
+
+There is a column for the **token** and one for the token's base form or **lemma**.
+
+Those are followed by a tag for the general lexical class or "universal part-of-speech" (**upos**) tag, and a tree-bank specific (**xpos**) part-of-speech tag.
+
+The **xpos** tags are Penn Treebank tags, which you can find here: <https://www.ling.upenn.edu/courses/Fall_2003/ling001/penn_treebank_pos.html>
+
+The part-of-speech tags are followed by a column of integers that refer to the id of the token that is at the head of the dependency structure, which is followed by the **dependency relation** identifier.
+
+For a list of all dependency abbreviaitons see here: <https://universaldependencies.org/u/dep/index.html>. 
+
+## Visualize the dependency
+
+From the "Output Text" tab, copy the output start with the **sent_id** including the pound sign
+
+Paste the information into the text field here: <https://urd2.let.rug.nl/~kleiweg/conllu/>. Then click the "Submit Query" button below the text field. This should generate a visualization of the dependency structure.
+
+# Load the needed packages 
+
+```{r setup, message = FALSE, error=FALSE, warning=FALSE}
+library(cmu.textstat)
+library(tidyverse)
+library(quanteda)
+library(quanteda.textstats)
+library(udpipe)
+```
+
+# Parsing
+
+## Preparing a corpus
+
+When we parse texts using a model like ones available in **udpipe** or **spacy**, we need to do very little to prepare the corpus. We could trim extra spaces and returns using **str_squish()** or remove urls, but generally we want the text to be mostly "as is" so the model can do its job.
+
+## Load a model
+
+I've already downloaded some language models and added them to the repository. We simply need to add the path to the model.
+
+```{r load_model}
+udmodel_arabic <- udpipe_load_model(file = '../models/arabic-padt-ud-2.5-191206.udpipe')
+```
+
+## Annotate a sentence
+
+```{r simple_sentence, message=FALSE, warning=FALSE}
+txt <- "كيف أصل إلى هناك، من فضلك؟"
+annotation <- udpipe_annotate(udmodel_arabic, x = txt)
+```
+
+
+```{r echo=FALSE}
+knitr::kable(as.data.frame(annotation))
+```
+
+
+# Annotate a corpus
+
+Parsing text is a computationally intensive process and can take time. For this example, we'll read in a table of Arabic news.
+
+```{r data_load, message = FALSE, error=FALSE}
+news_ar <- read_csv("../data/arabic_news.csv")
+news_ar <- news_ar %>%
+  mutate(id = paste0(type, '_', id))
+```
+
+# Annotate a corpus
+
+Parsing text is a computationally intensive process and can take time. So for the purposes of this lab, we'll create a smaller sub-sample of the the data. By adding a column called **text_type** which includes information extracted from the file names, we can sample 5 texts from each.
+
+```{r data_prep, message = FALSE, error=FALSE}
+set.seed(123)
+sub_corpus <- news_ar %>%
+  group_by(type) %>%
+  sample_n(5) %>%
+  ungroup() %>%
+  rename(doc_id = id) %>%
+  dplyr::select(doc_id, type, text)
+```
+
+## Parallel processing
+
+Parallel processing is a method whereby separate parts of an overall complex task are broken up and run simultaneously on multiple CPUs, thereby reducing the amount of time for processing. Part-of-speech tagging and dependency parsing are computationally intensive, so using parallel processing can save valuable time.
+
+The **udpipe()** function has an argument for assigning cores: **parallel.cores = 1L**. It's easy to set up, so feel free to use that option.
+
+A second option, requires more preparation, but is even faster. So we'll walk through how it works. First, we will split the corpus based on available cores.
+
+```{r}
+corpus_split <- split(sub_corpus, seq(1, nrow(sub_corpus), by = 5))
+```
+
+For parallel processing in R, we'll us the package **future.apply**.
+
+```{r,message = FALSE, error=FALSE, warning=FALSE}
+library(future.apply)
+```
+
+Next, we set up our parallel session by specifying the number of cores, and creating a simple annotation function.
+
+```{r anno_function}
+ncores <- 4L
+plan(multisession, workers = ncores)
+
+annotate_splits <- function(corpus_text) {
+  ud_model <- udpipe_load_model("../models/arabic-padt-ud-2.5-191206.udpipe")
+  x <- data.table::as.data.table(udpipe_annotate(ud_model, x = corpus_text$text,
+                                                 doc_id = corpus_text$doc_id))
+  return(x)
+}
+```
+
+Finally, we annotate using **future_lapply**. On my machine, this takes roughly 32 seconds.
+
+```{r anno_splits}
+annotation <- future_lapply(corpus_split, annotate_splits, future.seed = T)
+```
+
+As you might guess, the output is a list of data frames, so we'll combine them using **rbindlist()**.
+
+```{r}
+annotation <- data.table::rbindlist(annotation)
+```
+
+# Process with quanteda
+
+## Format the data for quanteda
+
+If we want to do any further processing in **quanteda**, we need to make a couple of adjustments to our data frame. 
+
+```{r anno_edit}
+anno_edit <- annotation %>%
+  dplyr::select(doc_id, sentence_id, token_id, token, lemma, upos, xpos, head_token_id, dep_rel) %>%
+  rename(pos = upos, tag = xpos)
+
+anno_edit <- structure(anno_edit, class = c("spacyr_parsed", "data.frame"))
+```
+
+## Convert to tokens
+
+```{r to_tokens}
+sub_tkns <- quanteda::as.tokens(anno_edit, include_pos = "pos", concatenator = "_")
+```
+
+## Create a dfm
+
+We will also extract and assign the variable **text_type** to the tokens object.
+
+```{r to_dfm}
+doc_categories <- names(sub_tkns) %>%
+  data.frame(text_type = .) %>%
+  mutate(text_type = str_extract(text_type, "^[a-z]+"))
+
+docvars(sub_tkns) <- doc_categories
+
+sub_dfm <- dfm(sub_tkns)
+```
+
+And check the frequencies:
+
+```{r echo=FALSE}
+knitr::kable(textstat_frequency(sub_dfm, n = 10))
+```
+
+## Filter/select tokens
+
+There are multiple ways to filter/select the tokens we want to count. We could, for example, just filter out all rows in the annotation data frame tagged as **PUNCT**, if we wanted to exclude punctuation from our counts.
+
+I would, however, advise against altering the original parsed file. We may want to try different options, and we want to avoid having to re-parse our corpus, as that is the most computationally intensive step in the processing pipeline. In fact, if this were part of an actual project, I would advise that you save the parsed data frame as a **.csv** file using **write_csv()** for later use.
+
+So we will try an alternative. We use the **tokens_select()** function to either keep or remove tokens based on regular expressions.
+
+```{r select_tokens}
+sub_dfm <- sub_tkns %>%
+  tokens_select("_PUNCT|_X", selection = "remove", valuetype = "regex", case_insensitive = T) %>%
+  dfm()
+
+```
+
+And check the frequencies:
+
+```{r echo=FALSE}
+knitr::kable(textstat_frequency(sub_dfm, n = 10))
+```
+
+
+If we want to compare one text-type (as our target corpus) to another (as our reference corpus), we can easily subset the data.
+
+```{r subset_corpus}
+culture_dfm <- dfm_subset(sub_dfm, text_type == "culture") %>% dfm_trim(min_termfreq = 1)
+economy_dfm <- dfm_subset(sub_dfm, text_type == "economy") %>% dfm_trim(min_termfreq = 1)
+```
+
+And finally, we can generate a keyness table, 
+
+```{r}
+cult_v_econ <- keyness_table(culture_dfm, economy_dfm) %>%
+  separate(col = Token, into = c("Token", "Tag"), sep = "_")
+```
+
+From that data, we can filter specific lexical classes, like nouns:
+
+```{r echo=FALSE}
+knitr::kable(head(cult_v_econ %>% filter(Tag == "noun")))
+```
+
+## Without tags
+
+We can also ignore the tagging, by creating a simple tokens object.
+
+```{r}
+sub_tkns <- quanteda::as.tokens(anno_edit)
+```
+
+From that, we can find collocates.
+
+```{r}
+collocations <- collocates_by_MI(sub_tkns, "الجائزة")
+```
+
+```{r}
+knitr::kable(head(collocations))
+```
+Or create a simple frequency table.
+
+```{r}
+ft <- frequency_table(sub_tkns)
+```
+
+
+```{r}
+knitr::kable(head(ft))
+```
