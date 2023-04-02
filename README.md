@@ -19,3 +19,8 @@ You can then run the code in the notebooks. For additional support and help, you
 * [`cmu.textstat`](https://cmu-textstat-docs.readthedocs.io/en/latest/quanteda.extras/vignettes/collocations_introduction.html)
 * [`quanteda`](http://quanteda.io/)
 * [`udpipe`](https://cran.r-project.org/web/packages/udpipe/vignettes/udpipe-annotation.html)
+
+You can also see previews of the notebooks:
+
+* For [Arabic](https://htmlpreview.github.io/?https://github.com/browndw/multilingual-nlp/blob/main/R/udpipe_arabic.html)
+* For [Chinese](https://htmlpreview.github.io/?https://github.com/browndw/multilingual-nlp/blob/main/R/udpipe_chinese.html)
